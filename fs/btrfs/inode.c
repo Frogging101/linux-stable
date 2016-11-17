@@ -60,6 +60,7 @@
 #include "hash.h"
 #include "props.h"
 #include "qgroup.h"
+#include "mrsaturn.h"
 
 struct btrfs_iget_args {
 	struct btrfs_key *location;
@@ -3041,12 +3042,83 @@ static int btrfs_writepage_end_io_hook(struct page *page, u64 start, u64 end,
 	return 0;
 }
 
+/*
+ * map logical device position to physical device position and its device ID.
+ *
+ * simplified excerpts from volumes.c:__btrfs_map_block() and
+ * volumes.c:btrfs_map_bio().
+ */
+u64 btrfs_log2phys(struct inode *inode, u64 logical, u64 len, dev_t *dev)
+{
+	struct btrfs_fs_info *fs_info = BTRFS_I(inode)->root->fs_info;
+	struct extent_map_tree *em_tree = &fs_info->mapping_tree.map_tree;
+	struct extent_map *em;
+	struct map_lookup *map;
+	u64 physical, offset, stripe_nr, stripe_offset, stripe_index;
+
+	read_lock(&em_tree->lock);
+	em = lookup_extent_mapping(em_tree, logical, len);
+	read_unlock(&em_tree->lock);
+
+	if (!em) {
+		pr_warn("%s: cannot lookup extent mapping for %llu\n",
+				__func__, logical);
+		return (u64)~0;
+	}
+
+	map = (struct map_lookup *)em->bdev;
+	if (map->type & (BTRFS_BLOCK_GROUP_RAID1|BTRFS_BLOCK_GROUP_RAID10)) {
+		pr_warn("%s: not supporting RAID1/10", __func__);
+		return (u64)~0;
+	}
+
+	offset = logical - em->start;
+	stripe_nr = offset;
+	do_div(stripe_nr, map->stripe_len);
+	stripe_offset = offset - stripe_nr * map->stripe_len;
+	stripe_index = do_div(stripe_nr, map->num_stripes);
+
+	/* TODO: Untested for multiple stipe cases (RAID0). */
+	physical =  map->stripes[stripe_index].physical +
+			stripe_offset + stripe_nr * map->stripe_len;
+	*dev = map->stripes[stripe_index].dev->bdev->bd_dev;
+	free_extent_map(em);
+	return physical;
+}
+
+/*
+ * map file position to physical device position and its device ID.
+ *
+ *	Done in 2 stages
+ *		#1: logical extent - FIEMAP equivalent
+ *		#2: physical extent - call to btrfs_log2phys() above
+ */
+static u64 fpos2phys(struct inode *inode, u64 fpos, u64 len, dev_t *dev)
+{
+	struct extent_map *em;
+	u64 logical;
+
+	em = btrfs_get_extent(inode, NULL, 0, fpos, len, 0);
+	if (IS_ERR(em) || !em) {
+		pr_err("%s: cannot get extent mapping for %llu\n",
+				__func__, fpos);
+		return (u64)~0;
+	}
+	logical = em->block_start + fpos - em->start;
+	free_extent_map(em);
+
+	return btrfs_log2phys(inode, logical, len, dev);
+}
+
+
 static int __readpage_endio_check(struct inode *inode,
 				  struct btrfs_io_bio *io_bio,
 				  int icsum, struct page *page,
 				  int pgoff, u64 start, size_t len)
 {
 	char *kaddr;
+	dev_t dev;
+    u64 phys;
 	u32 csum_expected;
 	u32 csum = ~(u32)0;
 
@@ -3061,9 +3133,11 @@ static int __readpage_endio_check(struct inode *inode,
 	kunmap_atomic(kaddr);
 	return 0;
 zeroit:
+    phys = fpos2phys(inode, start, len, &dev);
 	btrfs_warn_rl(BTRFS_I(inode)->root->fs_info,
-		"csum failed ino %llu off %llu csum %u expected csum %u",
-			   btrfs_ino(inode), start, csum, csum_expected);
+		"csum failed ino %llu off %llu csum %u expected csum %u phys %llu",
+			   btrfs_ino(inode), start, csum, csum_expected, phys);
+	btrfs_csmm_sendmismatch(dev, phys, csum, csum_expected);
 	memset(kaddr + pgoff, 1, len);
 	flush_dcache_page(page);
 	kunmap_atomic(kaddr);

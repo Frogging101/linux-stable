@@ -59,6 +59,7 @@
 #include "free-space-cache.h"
 #include "backref.h"
 #include "tests/btrfs-tests.h"
+#include "mrsaturn.h"
 
 #include "qgroup.h"
 #define CREATE_TRACE_POINTS
@@ -2321,6 +2322,11 @@ static int __init init_btrfs_fs(void)
 	err = register_filesystem(&btrfs_fs_type);
 	if (err)
 		goto unregister_ioctl;
+
+    err = btrfs_netlink_init();
+    if (err)
+        return err;
+
 
 	return 0;
 
