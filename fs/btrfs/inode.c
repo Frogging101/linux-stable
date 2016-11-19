@@ -43,6 +43,7 @@
 #include <linux/blkdev.h>
 #include <linux/posix_acl_xattr.h>
 #include <linux/uio.h>
+#include <linux/jiffies.h>
 #include "ctree.h"
 #include "disk-io.h"
 #include "transaction.h"
@@ -3118,9 +3119,10 @@ static int __readpage_endio_check(struct inode *inode,
 {
 	char *kaddr;
 	dev_t dev;
-    u64 phys;
+	u64 phys;
 	u32 csum_expected;
 	u32 csum = ~(u32)0;
+	unsigned long timeout = 5*HZ;
 
 	csum_expected = *(((u32 *)io_bio->csum) + icsum);
 
@@ -3133,11 +3135,28 @@ static int __readpage_endio_check(struct inode *inode,
 	kunmap_atomic(kaddr);
 	return 0;
 zeroit:
-    phys = fpos2phys(inode, start, len, &dev);
+	phys = fpos2phys(inode, start, len, &dev);
 	btrfs_warn_rl(BTRFS_I(inode)->root->fs_info,
 		"csum failed ino %llu off %llu csum %u expected csum %u phys %llu",
 			   btrfs_ino(inode), start, csum, csum_expected, phys);
-	btrfs_csmm_sendmismatch(dev, phys, csum, csum_expected);
+	if(btrfs_mrsaturn_available()) {
+		reinit_completion(&mismatch_processed);
+		btrfs_csmm_sendmismatch(dev, phys, len, csum, csum_expected);
+		timeout = wait_for_completion_timeout(&mismatch_processed, timeout);
+		if(timeout) {
+			if(mismatch_fixed) {
+				mismatch_fixed = false;
+				kunmap_atomic(kaddr);
+				return -EAGAIN;
+			} else {
+				btrfs_warn_rl(BTRFS_I(inode)->root->fs_info,
+					      "mrsaturn was unable to fix the error");
+			}
+		} else {
+			btrfs_warn_rl(BTRFS_I(inode)->root->fs_info,
+				      "timed out while waiting for netlink response");
+		}
+	}
 	memset(kaddr + pgoff, 1, len);
 	flush_dcache_page(page);
 	kunmap_atomic(kaddr);

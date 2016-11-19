@@ -2631,8 +2631,8 @@ static void end_bio_extent_readpage(struct bio *bio)
 		struct page *page = bvec->bv_page;
 		struct inode *inode = page->mapping->host;
 
-		pr_debug("end_bio_extent_readpage: bi_sector=%llu, err=%d, "
-			 "mirror=%u\n", (u64)bio->bi_iter.bi_sector,
+		pr_debug("end_bio_extent_readpage: bi_sector=%llu, offset=%llu, len=%llu, err=%d, "
+			 "mirror=%u\n", (u64)bio->bi_iter.bi_sector, offset, len,
 			 bio->bi_error, io_bio->mirror_num);
 		tree = &BTRFS_I(inode)->io_tree;
 
@@ -2663,8 +2663,88 @@ static void end_bio_extent_readpage(struct bio *bio)
 			ret = tree->ops->readpage_end_io_hook(io_bio, offset,
 							      page, start, end,
 							      mirror);
-			if (ret)
+			if (ret) {
+				if(ret == -EAGAIN) {
+					/* Return code indicates that we are to try the bio again.
+					 * This whole process was lifted from bio_readpage_error
+					 * and the functions it calls (btrfs_create_repair_bio,
+					 * btrfs_get_io_failure_record).
+					 * It does basically the same thing except it uses the same
+					 * mirror instead of changing it.
+
+					 * I feel like there must be a shorter way to do this...
+					 */
+
+					unsigned long bio_flags = 0;
+					int read_mode;
+					struct btrfs_fs_info *fs_info = BTRFS_I(inode)->root->fs_info;
+					struct extent_map_tree *em_tree = &BTRFS_I(inode)->extent_tree;
+					struct extent_map *em;
+					struct bio *rbio;
+					struct btrfs_io_bio *bbio;
+					struct btrfs_io_bio *brbio;
+					int icsum;
+					u64 logical;
+
+					read_lock(&em_tree->lock);
+					em = lookup_extent_mapping(em_tree, start, end-start + 1);
+					if (!em) {
+						read_unlock(&em_tree->lock);
+						goto error;
+					}
+
+					if (em->start > start || em->start + em->len <= start) {
+						free_extent_map(em);
+						em = NULL;
+					}
+					read_unlock(&em_tree->lock);
+					if (!em) {
+						goto error;
+					}
+
+					rbio = btrfs_io_bio_alloc(GFP_NOFS, 1);
+					if(!rbio)
+						goto error;
+					rbio->bi_end_io = bio->bi_end_io;
+					logical = start - em->start;
+					logical = em->block_start + logical;
+					if (test_bit(EXTENT_FLAG_COMPRESSED, &em->flags)) {
+						logical = em->block_start;
+						bio_flags = EXTENT_BIO_COMPRESSED;
+						extent_set_compress_type(&bio_flags, em->compress_type);
+					}
+
+					rbio->bi_iter.bi_sector = logical >> 9;
+					rbio->bi_bdev = fs_info->fs_devices->latest_bdev;
+					rbio->bi_iter.bi_size = 0;
+					rbio->bi_private = NULL;
+
+					bbio = btrfs_io_bio(bio);
+					if(bbio->csum) {
+						u16 csum_size = btrfs_super_csum_size(fs_info->super_copy);
+						brbio = btrfs_io_bio(rbio);
+						brbio->csum = brbio->csum_inline;
+						icsum = offset >> inode->i_sb->s_blocksize_bits;
+						icsum *= csum_size;
+						memcpy(brbio->csum, bbio->csum + icsum, csum_size);
+					}
+
+					bio_add_page(rbio, page, end-start + 1, start - page_offset(page));
+
+					if(bio->bi_vcnt > 1)
+						read_mode = READ_SYNC | REQ_FAILFAST_DEV;
+					else
+						read_mode = READ_SYNC;
+
+					tree->ops->submit_bio_hook(inode, read_mode, rbio,
+								   mirror, bio_flags, 0);
+					btrfs_info_rl(fs_info, "csum error corrected my mrsaturn");
+					uptodate = !bio->bi_error;
+					offset += len;
+					continue;
+				}
 				uptodate = 0;
+			}
 			else
 				clean_io_failure(inode, start, page, 0);
 		}
@@ -2672,6 +2752,7 @@ static void end_bio_extent_readpage(struct bio *bio)
 		if (likely(uptodate))
 			goto readpage_ok;
 
+error:
 		if (tree->ops && tree->ops->readpage_io_failed_hook) {
 			ret = tree->ops->readpage_io_failed_hook(page, mirror);
 			if (!ret && !bio->bi_error)
