@@ -3048,6 +3048,8 @@ static int btrfs_writepage_end_io_hook(struct page *page, u64 start, u64 end,
  *
  * simplified excerpts from volumes.c:__btrfs_map_block() and
  * volumes.c:btrfs_map_bio().
+ *
+ * This function was taken verbatim from Netgear's ReadyNAS OS
  */
 u64 btrfs_log2phys(struct inode *inode, u64 logical, u64 len, dev_t *dev)
 {
@@ -3093,6 +3095,8 @@ u64 btrfs_log2phys(struct inode *inode, u64 logical, u64 len, dev_t *dev)
  *	Done in 2 stages
  *		#1: logical extent - FIEMAP equivalent
  *		#2: physical extent - call to btrfs_log2phys() above
+ *
+ * This function was taken verbatim from Netgear's ReadyNAS OS
  */
 static u64 fpos2phys(struct inode *inode, u64 fpos, u64 len, dev_t *dev)
 {
@@ -3139,6 +3143,7 @@ zeroit:
 	btrfs_warn_rl(BTRFS_I(inode)->root->fs_info,
 		"csum failed ino %llu off %llu csum %u expected csum %u phys %llu",
 			   btrfs_ino(inode), start, csum, csum_expected, phys);
+
 	if(btrfs_mrsaturn_available()) {
 		reinit_completion(&mismatch_processed);
 		btrfs_csmm_sendmismatch(dev, phys, len, csum, csum_expected);

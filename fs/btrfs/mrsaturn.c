@@ -16,8 +16,8 @@ enum {
     BTRFS_CSMM_C_HELLO,
     BTRFS_CSMM_C_GOODBYE,
     BTRFS_CSMM_C_ECHO,
-    BTRFS_CSMM_C_MISMATCH,
-    BTRFS_CSMM_C_MISMATCH_PROCESSED,
+    BTRFS_CSMM_C_MISMATCH, // inform helper of mismatch error
+    BTRFS_CSMM_C_MISMATCH_PROCESSED, // response from helper
     __BTRFS_CSMM_C_MAX,
 };
 
@@ -26,11 +26,11 @@ enum {
     BTRFS_CSMM_A_MSG,
     BTRFS_CSMM_A_CSUM_ACTUAL,
     BTRFS_CSMM_A_CSUM_EXPECTED,
-    BTRFS_CSMM_A_PHYS,
+    BTRFS_CSMM_A_PHYS,  // Physical location of data (from Btrfs' perspective)
     BTRFS_CSMM_A_LENGTH,
-    BTRFS_CSMM_A_MAJOR,
-    BTRFS_CSMM_A_MINOR,
-    BTRFS_CSMM_A_FIXED,
+    BTRFS_CSMM_A_MAJOR, // Major number of underlying block device
+    BTRFS_CSMM_A_MINOR, // Minor number of underlying block device
+    BTRFS_CSMM_A_FIXED, // Flag indicating whether the error was fixed
     __BTRFS_CSMM_A_MAX
 };
 
@@ -55,6 +55,7 @@ static struct genl_family btrfs_csmm_gnl_family = {
     .maxattr = BTRFS_CSMM_A_MAX,
 };
 
+// TODO: Attribute policies for these ops
 static struct genl_ops btrfs_csmm_gnl_ops[4] = {
     {
         .cmd = BTRFS_CSMM_C_ECHO,
@@ -93,6 +94,9 @@ bool btrfs_mrsaturn_available() {
     return true;
 }
 
+/* The helper must register so that the driver knows where to
+ * send requests
+ */
 static int btrfs_csmm_hello(struct sk_buff *skb, struct genl_info *info) {
     printk(KERN_INFO "BTRFS: Registering helper port ID %d\n", info->snd_portid);
     if(dpid)
@@ -102,6 +106,7 @@ static int btrfs_csmm_hello(struct sk_buff *skb, struct genl_info *info) {
     netns = genl_info_net(info);
     return 0;
 }
+
 static int btrfs_csmm_goodbye(struct sk_buff *skb, struct genl_info *info) {
     printk(KERN_INFO "BTRFS: Unregistering helper port ID %d\n", dpid);
     dpid = 0;
@@ -112,6 +117,7 @@ static int btrfs_csmm_goodbye(struct sk_buff *skb, struct genl_info *info) {
 static int btrfs_csmm_echo(struct sk_buff *skb, struct genl_info *info) {
     struct nlattr *msgattr = info->attrs[BTRFS_CSMM_A_MSG];
     printk("BTRFS: netlink echo test: %s\n", (char *)nla_data(msgattr));
+    // If we got "ping", then reply with a "pong!" message
     if(strcmp((char *)nla_data(msgattr), "ping") == 0) {
         struct sk_buff *nskb;
         void *msg_head;
